@@ -4,6 +4,6 @@
   "private": true,
   "description": "Share your Mac screen to a smart TV browser on the same Wi-Fi",
   "main": "server.js",
-  "scripts": { "start": "node server.js" },
+  "scripts": { "start": "node server.js", "loadtest": "node tools/loadtest.js" },
   "dependencies": { "ws": "^8.18.0" }
 }

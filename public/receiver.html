@@ -85,14 +85,20 @@
   function connect() {
     ws = new WebSocket('ws://' + location.host + '/ws');
     ws.binaryType = 'blob';
-    ws.onopen = function () { send({ type: 'hello', role: 'receiver' }); };
+    // acks: this page confirms each JPEG frame so the server never queues stale ones.
+    ws.onopen = function () { send({ type: 'hello', role: 'receiver', acks: true }); };
     ws.onclose = function () {
       closePeer();
       setOverlay('Connection lost', 'Is the server still running on the laptop? Retrying…');
       setTimeout(connect, 2000);
     };
     ws.onmessage = function (e) {
-      if (typeof e.data !== 'string') { showJpeg(e.data); return; }
+      if (typeof e.data !== 'string') {
+        // Ack on arrival, not after decode, so the next frame downloads while this one decodes.
+        send({ type: 'frame-ack' });
+        showJpeg(e.data);
+        return;
+      }
       var msg;
       try { msg = JSON.parse(e.data); } catch (err) { return; }
       handleMessage(msg);

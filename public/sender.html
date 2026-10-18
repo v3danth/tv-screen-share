@@ -288,7 +288,7 @@ const tickWorker = new Worker(URL.createObjectURL(new Blob([
 tickWorker.onmessage = () => sendJpegFrame();
 
 const canvas = document.createElement('canvas');
-const ctx = canvas.getContext('2d');
+const ctx = canvas.getContext('2d', { alpha: false }); // JPEG has no alpha
 let imageCapture = null;
 let frameBusy = false;
 
@@ -322,9 +322,12 @@ async function sendJpegFrame() {
     const srcW = frame.width || frame.videoWidth;
     const srcH = frame.height || frame.videoHeight;
     const scale = Math.min(1, Number(jpegWidthSelect.value) / srcW);
-    canvas.width = Math.round(srcW * scale);
-    canvas.height = Math.round(srcH * scale);
-    ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
+    const w = Math.round(srcW * scale);
+    const h = Math.round(srcH * scale);
+    // Assigning a canvas size reallocates and clears it, even to the same value.
+    if (canvas.width !== w) canvas.width = w;
+    if (canvas.height !== h) canvas.height = h;
+    ctx.drawImage(frame, 0, 0, w, h);
     if (frame.close) frame.close();
     const blob = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', 0.75));
     if (blob && ws.readyState === WebSocket.OPEN) ws.send(blob);
