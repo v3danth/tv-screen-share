@@ -1,0 +1,9 @@
+{
+  "name": "tv-screen-share",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Share your Mac screen to a smart TV browser on the same Wi-Fi",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "dependencies": { "ws": "^8.18.0" }
+}

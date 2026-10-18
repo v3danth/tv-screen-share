@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Screen Share Sender</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --panel: #ffffff; --text: #1c1c1a; --muted: #6b6b66;
+    --line: #e2e2dd; --accent: #2f6fdf; --accent-text: #ffffff;
+    --ok: #1f8a4c; --warn: #b5730d; --danger: #c43d3d;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161615; --panel: #1f1f1e; --text: #ececea; --muted: #9a9a94;
+      --line: #33332f; --accent: #5b8ff0; --accent-text: #0d0d0c;
+      --ok: #4cc27f; --warn: #e0a440; --danger: #ef6b6b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  main { max-width: 760px; margin: 0 auto; padding: 32px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 24px; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 18px; margin-bottom: 16px;
+  }
+  .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  button {
+    font: inherit; font-weight: 600; border: 0; border-radius: 8px;
+    padding: 10px 18px; cursor: pointer; background: var(--accent); color: var(--accent-text);
+  }
+  button.stop { background: var(--danger); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  .status { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); }
+  .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); }
+  video {
+    width: 100%; border-radius: 8px; background: #000; display: block;
+    aspect-ratio: 16 / 9; object-fit: contain;
+  }
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+  select { font: inherit; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line);
+    background: var(--panel); color: var(--text); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { padding: 6px 0; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; }
+  li:last-child { border-bottom: 0; }
+  .muted { color: var(--muted); }
+  code { background: var(--bg); padding: 2px 6px; border-radius: 4px; }
+  h2 { font-size: 15px; margin: 0 0 12px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Share screen to TV</h1>
+  <p class="sub">Keep this tab open while sharing. Open it in its own Chrome window so it keeps running smoothly.</p>
+
+  <div class="panel">
+    <div class="row">
+      <button id="startBtn">Start sharing</button>
+      <button id="stopBtn" class="stop" hidden>Stop sharing</button>
+      <span class="status"><span id="serverDot" class="dot"></span><span id="serverText">Connecting to server…</span></span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Preview</h2>
+    <video id="preview" autoplay muted playsinline></video>
+  </div>
+
+  <div class="panel">
+    <h2>Quality</h2>
+    <div class="grid">
+      <div>
+        <label for="hint">Optimise for</label>
+        <select id="hint">
+          <option value="detail">Sharp text (documents, code)</option>
+          <option value="motion">Smooth motion (video)</option>
+        </select>
+      </div>
+      <div>
+        <label for="bitrate">Bitrate (WebRTC)</label>
+        <select id="bitrate">
+          <option value="4000000">4 Mbps</option>
+          <option value="8000000" selected>8 Mbps</option>
+          <option value="15000000">15 Mbps</option>
+        </select>
+      </div>
+      <div>
+        <label for="jpegWidth">Resolution (JPEG mode)</label>
+        <select id="jpegWidth">
+          <option value="1280">720p</option>
+          <option value="1920" selected>1080p</option>
+        </select>
+      </div>
+      <div>
+        <label for="jpegFps">Frame rate (JPEG mode)</label>
+        <select id="jpegFps">
+          <option value="10">10 fps</option>
+          <option value="15" selected>15 fps</option>
+          <option value="24">24 fps</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Connected TVs</h2>
+    <ul id="tvList"><li class="muted">No TVs connected yet.</li></ul>
+    <p class="muted" id="tvHint" style="margin:12px 0 0">On the TV's web browser, open the address printed in the terminal, for example <code>http://192.168.x.x:8080</code>.</p>
+  </div>
+</main>
+
+<script>
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const preview = document.getElementById('preview');
+const serverDot = document.getElementById('serverDot');
+const serverText = document.getElementById('serverText');
+const tvList = document.getElementById('tvList');
+const hintSelect = document.getElementById('hint');
+const bitrateSelect = document.getElementById('bitrate');
+const jpegWidthSelect = document.getElementById('jpegWidth');
+const jpegFpsSelect = document.getElementById('jpegFps');
+
+const MAX_SOCKET_BUFFER = 2 * 1024 * 1024;
+
+let ws = null;
+let stream = null;
+let receiverIds = [];
+const peers = new Map();        // receiver id -> RTCPeerConnection
+const jpegReceivers = new Set(); // receiver ids that use the JPEG fallback
+
+// ---------- server connection ----------
+
+function connect() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => {
+    ws.send(JSON.stringify({ type: 'hello', role: 'sender' }));
+    setServerStatus('ok', 'Connected to server');
+  };
+  ws.onclose = (e) => {
+    setServerStatus('warn', e.code === 4000 ? 'Another sender tab took over' : 'Server disconnected, retrying…');
+    for (const id of [...peers.keys()]) closePeer(id);
+    if (e.code !== 4000) setTimeout(connect, 1500);
+  };
+  ws.onmessage = (e) => handleMessage(JSON.parse(e.data));
+}
+
+function sendMsg(msg) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+}
+
+function setServerStatus(kind, text) {
+  serverDot.className = 'dot ' + kind;
+  serverText.textContent = text;
+}
+
+function handleMessage(msg) {
+  switch (msg.type) {
+    case 'receivers':
+      receiverIds = msg.ids;
+      for (const id of [...jpegReceivers]) if (!receiverIds.includes(id)) jpegReceivers.delete(id);
+      renderTvList();
+      break;
+    case 'receiver-joined':
+      jpegReceivers.delete(msg.id);
+      if (stream) startPeer(msg.id);
+      break;
+    case 'receiver-left':
+      closePeer(msg.id);
+      jpegReceivers.delete(msg.id);
+      break;
+    case 'signal':
+      handleSignal(msg.from, msg.data);
+      break;
+    case 'want-jpeg':
+      closePeer(msg.from);
+      jpegReceivers.add(msg.from);
+      renderTvList();
+      updateJpegLoop();
+      break;
+  }
+}
+
+// ---------- capture ----------
+
+async function startSharing() {
+  try {
+    stream = await navigator.mediaDevices.getDisplayMedia({
+      video: { frameRate: { ideal: 30, max: 60 }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+      audio: false,
+    });
+  } catch (err) {
+    setServerStatus('warn', 'Screen sharing was cancelled or blocked');
+    return;
+  }
+
+  const track = stream.getVideoTracks()[0];
+  track.contentHint = hintSelect.value;
+  track.addEventListener('ended', stopSharing);
+  preview.srcObject = stream;
+
+  startBtn.hidden = true;
+  stopBtn.hidden = false;
+  sendMsg({ type: 'sharing', active: true });
+
+  for (const id of receiverIds) if (!jpegReceivers.has(id)) startPeer(id);
+  updateJpegLoop();
+}
+
+function stopSharing() {
+  if (stream) stream.getTracks().forEach((t) => t.stop());
+  stream = null;
+  preview.srcObject = null;
+  for (const id of [...peers.keys()]) closePeer(id);
+  updateJpegLoop();
+  startBtn.hidden = false;
+  stopBtn.hidden = true;
+  sendMsg({ type: 'sharing', active: false });
+  renderTvList();
+}
+
+// ---------- WebRTC ----------
+
+async function startPeer(id) {
+  closePeer(id);
+  // Same Wi-Fi only, so no STUN/TURN servers are needed.
+  const pc = new RTCPeerConnection({ iceServers: [] });
+  peers.set(id, pc);
+
+  stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+  pc.onicecandidate = (e) => {
+    if (e.candidate) sendMsg({ type: 'signal', to: id, data: { candidate: e.candidate } });
+  };
+  pc.onconnectionstatechange = () => {
+    renderTvList();
+    if (pc.connectionState === 'connected') applyEncoding(pc);
+  };
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  sendMsg({ type: 'signal', to: id, data: { sdp: pc.localDescription } });
+  renderTvList();
+}
+
+async function applyEncoding(pc) {
+  for (const s of pc.getSenders()) {
+    if (!s.track || s.track.kind !== 'video') continue;
+    const params = s.getParameters();
+    if (!params.encodings || !params.encodings.length) params.encodings = [{}];
+    params.encodings[0].maxBitrate = Number(bitrateSelect.value);
+    params.degradationPreference = hintSelect.value === 'detail' ? 'maintain-resolution' : 'maintain-framerate';
+    try { await s.setParameters(params); } catch (err) { console.warn('setParameters failed', err); }
+  }
+}
+
+async function handleSignal(id, data) {
+  const pc = peers.get(id);
+  if (!pc) return;
+  try {
+    if (data.sdp) await pc.setRemoteDescription(data.sdp);
+    else if (data.candidate) await pc.addIceCandidate(data.candidate);
+  } catch (err) {
+    console.warn('Signal error', err);
+  }
+}
+
+function closePeer(id) {
+  const pc = peers.get(id);
+  if (!pc) return;
+  pc.close();
+  peers.delete(id);
+  renderTvList();
+}
+
+// ---------- JPEG fallback ----------
+// Timers run in a worker because Chrome slows down timers in background tabs.
+
+const tickWorker = new Worker(URL.createObjectURL(new Blob([
+  'let t=null;onmessage=e=>{clearInterval(t);if(e.data>0)t=setInterval(()=>postMessage(0),e.data);};'
+], { type: 'text/javascript' })));
+tickWorker.onmessage = () => sendJpegFrame();
+
+const canvas = document.createElement('canvas');
+const ctx = canvas.getContext('2d');
+let imageCapture = null;
+let frameBusy = false;
+
+function updateJpegLoop() {
+  const active = Boolean(stream) && jpegReceivers.size > 0;
+  if (active) {
+    const track = stream.getVideoTracks()[0];
+    imageCapture = 'ImageCapture' in window ? new ImageCapture(track) : null;
+    tickWorker.postMessage(Math.round(1000 / Number(jpegFpsSelect.value)));
+  } else {
+    imageCapture = null;
+    tickWorker.postMessage(0);
+  }
+}
+
+async function grabFrame() {
+  if (imageCapture) {
+    try { return await imageCapture.grabFrame(); } catch { /* fall back to the preview */ }
+  }
+  if (preview.videoWidth) return preview;
+  return null;
+}
+
+async function sendJpegFrame() {
+  if (frameBusy || !stream || !ws || ws.readyState !== WebSocket.OPEN) return;
+  if (ws.bufferedAmount > MAX_SOCKET_BUFFER) return; // network is behind, skip a frame
+  frameBusy = true;
+  try {
+    const frame = await grabFrame();
+    if (!frame) return;
+    const srcW = frame.width || frame.videoWidth;
+    const srcH = frame.height || frame.videoHeight;
+    const scale = Math.min(1, Number(jpegWidthSelect.value) / srcW);
+    canvas.width = Math.round(srcW * scale);
+    canvas.height = Math.round(srcH * scale);
+    ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
+    if (frame.close) frame.close();
+    const blob = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', 0.75));
+    if (blob && ws.readyState === WebSocket.OPEN) ws.send(blob);
+  } finally {
+    frameBusy = false;
+  }
+}
+
+// ---------- UI ----------
+
+function renderTvList() {
+  if (!receiverIds.length) {
+    tvList.innerHTML = '<li class="muted">No TVs connected yet.</li>';
+    return;
+  }
+  tvList.innerHTML = '';
+  for (const id of receiverIds) {
+    let state;
+    if (!stream) state = 'Waiting for you to start sharing';
+    else if (jpegReceivers.has(id)) state = 'Receiving (compatibility mode)';
+    else {
+      const pc = peers.get(id);
+      state = pc ? (pc.connectionState === 'connected' ? 'Receiving (WebRTC)' : 'Connecting…') : 'Connecting…';
+    }
+    const li = document.createElement('li');
+    li.innerHTML = `<span>TV ${id}</span><span class="muted"></span>`;
+    li.lastChild.textContent = state;
+    tvList.appendChild(li);
+  }
+}
+
+hintSelect.onchange = () => {
+  if (stream) stream.getVideoTracks()[0].contentHint = hintSelect.value;
+  for (const pc of peers.values()) applyEncoding(pc);
+};
+bitrateSelect.onchange = () => { for (const pc of peers.values()) applyEncoding(pc); };
+jpegFpsSelect.onchange = updateJpegLoop;
+
+startBtn.onclick = startSharing;
+stopBtn.onclick = stopSharing;
+connect();
+</script>
+</body>
+</html>

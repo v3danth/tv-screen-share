@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TV Screen</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; color: #eee; cursor: none; }
+  #video, #img {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    object-fit: contain; background: #000; display: none;
+  }
+  #overlay {
+    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+    display: flex; align-items: center; justify-content: center; text-align: center;
+    background: #000; padding: 40px;
+  }
+  #overlay h1 { font-size: 44px; font-weight: 600; margin: 0 0 16px; }
+  #overlay p { font-size: 26px; color: #aaa; margin: 8px 0; }
+  #badge {
+    position: absolute; right: 24px; bottom: 24px; padding: 8px 14px; border-radius: 8px;
+    background: rgba(0,0,0,.6); color: #ddd; font-size: 18px; display: none;
+  }
+</style>
+</head>
+<body>
+<video id="video" autoplay muted playsinline></video>
+<img id="img" alt="">
+<div id="overlay">
+  <div>
+    <h1 id="title">Connecting…</h1>
+    <p id="detail">Looking for the laptop on this Wi-Fi.</p>
+    <p>Press OK / Enter for full screen.</p>
+  </div>
+</div>
+<div id="badge"></div>
+
+<script>
+// Written in plain ES5 so older smart-TV browsers can run it.
+(function () {
+  var video = document.getElementById('video');
+  var img = document.getElementById('img');
+  var overlay = document.getElementById('overlay');
+  var titleEl = document.getElementById('title');
+  var detailEl = document.getElementById('detail');
+  var badge = document.getElementById('badge');
+
+  var WEBRTC_TIMEOUT_MS = 8000;
+
+  var ws = null;
+  var pc = null;
+  var mode = window.RTCPeerConnection ? 'webrtc' : 'jpeg';
+  var fallbackTimer = null;
+  var showingImage = false;
+  var pendingBlob = null;
+  var decoding = false;
+  var badgeTimer = null;
+
+  function setOverlay(title, detail) {
+    titleEl.textContent = title;
+    detailEl.textContent = detail;
+    overlay.style.display = 'flex';
+    video.style.display = 'none';
+    img.style.display = 'none';
+    showingImage = false;
+  }
+
+  function hideOverlay(el) {
+    overlay.style.display = 'none';
+    el.style.display = 'block';
+  }
+
+  function flashBadge(text) {
+    badge.textContent = text;
+    badge.style.display = 'block';
+    clearTimeout(badgeTimer);
+    badgeTimer = setTimeout(function () { badge.style.display = 'none'; }, 4000);
+  }
+
+  function send(msg) {
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify(msg));
+  }
+
+  function connect() {
+    ws = new WebSocket('ws://' + location.host + '/ws');
+    ws.binaryType = 'blob';
+    ws.onopen = function () { send({ type: 'hello', role: 'receiver' }); };
+    ws.onclose = function () {
+      closePeer();
+      setOverlay('Connection lost', 'Is the server still running on the laptop? Retrying…');
+      setTimeout(connect, 2000);
+    };
+    ws.onmessage = function (e) {
+      if (typeof e.data !== 'string') { showJpeg(e.data); return; }
+      var msg;
+      try { msg = JSON.parse(e.data); } catch (err) { return; }
+      handleMessage(msg);
+    };
+  }
+
+  function handleMessage(msg) {
+    switch (msg.type) {
+      case 'welcome':
+      case 'sender-online':
+        if (msg.type === 'welcome' && !msg.senderOnline) {
+          setOverlay('Waiting for laptop', 'Open the sender page on your laptop.');
+          return;
+        }
+        setOverlay('Ready', 'Click "Start sharing" on your laptop.');
+        if (mode === 'jpeg') send({ type: 'want-jpeg' });
+        break;
+      case 'sender-offline':
+        closePeer();
+        setOverlay('Waiting for laptop', 'The sender page on the laptop was closed.');
+        break;
+      case 'sharing':
+        if (!msg.active) {
+          closePeer();
+          setOverlay('Sharing stopped', 'Click "Start sharing" on your laptop to continue.');
+        } else if (mode === 'jpeg') {
+          send({ type: 'want-jpeg' });
+        }
+        break;
+      case 'signal':
+        handleSignal(msg.data);
+        break;
+    }
+  }
+
+  // ---------- WebRTC ----------
+
+  function handleSignal(data) {
+    if (mode === 'jpeg') { send({ type: 'want-jpeg' }); return; }
+    if (data.sdp && data.sdp.type === 'offer') {
+      startPeer(data.sdp);
+    } else if (data.candidate && pc) {
+      pc.addIceCandidate(data.candidate)['catch'](function () {});
+    }
+  }
+
+  function startPeer(offer) {
+    closePeer();
+    setOverlay('Connecting…', 'Starting the video stream.');
+    pc = new RTCPeerConnection({ iceServers: [] });
+    pc.onicecandidate = function (e) {
+      if (e.candidate) send({ type: 'signal', data: { candidate: e.candidate } });
+    };
+    pc.ontrack = function (e) {
+      if (e.streams && e.streams[0]) video.srcObject = e.streams[0];
+      else video.srcObject = new MediaStream([e.track]);
+      var p = video.play();
+      if (p && p['catch']) p['catch'](function () {});
+    };
+    pc.onconnectionstatechange = function () {
+      if (pc && pc.connectionState === 'failed') switchToJpeg('WebRTC connection failed');
+    };
+
+    clearTimeout(fallbackTimer);
+    fallbackTimer = setTimeout(function () {
+      if (!video.videoWidth) switchToJpeg('WebRTC did not start in time');
+    }, WEBRTC_TIMEOUT_MS);
+
+    pc.setRemoteDescription(offer)
+      .then(function () { return pc.createAnswer(); })
+      .then(function (answer) { return pc.setLocalDescription(answer); })
+      .then(function () { send({ type: 'signal', data: { sdp: pc.localDescription } }); })
+      ['catch'](function () { switchToJpeg('This TV could not start WebRTC'); });
+  }
+
+  video.addEventListener('playing', function () {
+    clearTimeout(fallbackTimer);
+    hideOverlay(video);
+    flashBadge('Connected');
+  });
+
+  function closePeer() {
+    clearTimeout(fallbackTimer);
+    if (pc) { pc.close(); pc = null; }
+    video.srcObject = null;
+  }
+
+  function switchToJpeg(reason) {
+    if (mode === 'jpeg') return;
+    closePeer();
+    mode = 'jpeg';
+    setOverlay('Switching to compatibility mode…', reason);
+    send({ type: 'want-jpeg' });
+  }
+
+  // ---------- JPEG fallback ----------
+  // Only one frame decodes at a time; newer frames replace older pending ones.
+
+  function showJpeg(blob) {
+    pendingBlob = blob;
+    if (!decoding) decodeNext();
+  }
+
+  function decodeNext() {
+    if (!pendingBlob) { decoding = false; return; }
+    decoding = true;
+    var url = URL.createObjectURL(pendingBlob);
+    pendingBlob = null;
+    img.onload = img.onerror = function () {
+      var old = img.getAttribute('data-url');
+      if (old) URL.revokeObjectURL(old);
+      img.setAttribute('data-url', url);
+      if (!showingImage) {
+        showingImage = true;
+        hideOverlay(img);
+        flashBadge('Connected (compatibility mode)');
+      }
+      decodeNext();
+    };
+    img.src = url;
+  }
+
+  // ---------- full screen ----------
+
+  function goFullscreen() {
+    var el = document.documentElement;
+    var fn = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen || el.msRequestFullscreen;
+    if (fn) { try { fn.call(el); } catch (err) {} }
+  }
+  document.addEventListener('click', goFullscreen);
+  document.addEventListener('keydown', function (e) {
+    if (e.keyCode === 13) goFullscreen();
+  });
+
+  connect();
+})();
+</script>
+</body>
+</html>
