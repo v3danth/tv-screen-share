@@ -52,6 +52,7 @@
   var pc = null;
   var mode = window.RTCPeerConnection ? 'webrtc' : 'jpeg';
   var fallbackTimer = null;
+  var jpegAllowed = false; // set by the server's welcome message
   var showingImage = false;
   var pendingBlob = null;
   var decoding = false;
@@ -109,12 +110,13 @@
     switch (msg.type) {
       case 'welcome':
       case 'sender-online':
+        if (msg.type === 'welcome') jpegAllowed = msg.jpegFallback === true;
         if (msg.type === 'welcome' && !msg.senderOnline) {
           setOverlay('Waiting for laptop', 'Open the sender page on your laptop.');
           return;
         }
         setOverlay('Ready', 'Click "Start sharing" on your laptop.');
-        if (mode === 'jpeg') send({ type: 'want-jpeg' });
+        if (mode === 'jpeg') requestJpeg();
         break;
       case 'sender-offline':
         closePeer();
@@ -125,7 +127,7 @@
           closePeer();
           setOverlay('Sharing stopped', 'Click "Start sharing" on your laptop to continue.');
         } else if (mode === 'jpeg') {
-          send({ type: 'want-jpeg' });
+          requestJpeg();
         }
         break;
       case 'signal':
@@ -137,7 +139,7 @@
   // ---------- WebRTC ----------
 
   function handleSignal(data) {
-    if (mode === 'jpeg') { send({ type: 'want-jpeg' }); return; }
+    if (mode === 'jpeg') { requestJpeg(); return; }
     if (data.sdp && data.sdp.type === 'offer') {
       startPeer(data.sdp);
     } else if (data.candidate && pc) {
@@ -153,6 +155,11 @@
       if (e.candidate) send({ type: 'signal', data: { candidate: e.candidate } });
     };
     pc.ontrack = function (e) {
+      // Play frames as soon as they decode instead of buffering for smoothness.
+      if (e.receiver) {
+        if ('jitterBufferTarget' in e.receiver) e.receiver.jitterBufferTarget = 0;
+        if ('playoutDelayHint' in e.receiver) e.receiver.playoutDelayHint = 0;
+      }
       if (e.streams && e.streams[0]) video.srcObject = e.streams[0];
       else video.srcObject = new MediaStream([e.track]);
       var p = video.play();
@@ -189,9 +196,20 @@
   function switchToJpeg(reason) {
     if (mode === 'jpeg') return;
     closePeer();
+    // Stays in WebRTC mode, so the next offer from the laptop tries again.
+    if (!jpegAllowed) {
+      setOverlay('Video could not start', reason + '. Compatibility mode is turned off.');
+      return;
+    }
     mode = 'jpeg';
     setOverlay('Switching to compatibility mode…', reason);
     send({ type: 'want-jpeg' });
+  }
+
+  // For TV browsers without WebRTC at all.
+  function requestJpeg() {
+    if (jpegAllowed) send({ type: 'want-jpeg' });
+    else setOverlay('This TV is not supported', 'Its browser cannot play WebRTC video, and compatibility mode is turned off.');
   }
 
   // ---------- JPEG fallback ----------

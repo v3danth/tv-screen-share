@@ -84,26 +84,39 @@
         </select>
       </div>
       <div>
+        <label for="resolution">Resolution</label>
+        <select id="resolution">
+          <option value="1280x720">720p</option>
+          <option value="1920x1080" selected>1080p</option>
+          <option value="2560x1440">1440p</option>
+          <option value="3840x2160">4K</option>
+          <option value="native">Native (heaviest)</option>
+        </select>
+      </div>
+      <div>
+        <label for="fps">Frame rate</label>
+        <select id="fps">
+          <option value="15">15 fps</option>
+          <option value="30">30 fps</option>
+          <option value="60" selected>60 fps</option>
+        </select>
+      </div>
+      <div>
         <label for="bitrate">Bitrate (WebRTC)</label>
         <select id="bitrate">
-          <option value="4000000">4 Mbps</option>
-          <option value="8000000" selected>8 Mbps</option>
           <option value="15000000">15 Mbps</option>
+          <option value="25000000">25 Mbps</option>
+          <option value="40000000">40 Mbps</option>
+          <option value="60000000" selected>60 Mbps</option>
+          <option value="100000000">100 Mbps (4K, strong Wi-Fi)</option>
         </select>
       </div>
-      <div>
-        <label for="jpegWidth">Resolution (JPEG mode)</label>
-        <select id="jpegWidth">
-          <option value="1280">720p</option>
-          <option value="1920" selected>1080p</option>
-        </select>
-      </div>
-      <div>
-        <label for="jpegFps">Frame rate (JPEG mode)</label>
-        <select id="jpegFps">
-          <option value="10">10 fps</option>
-          <option value="15" selected>15 fps</option>
-          <option value="24">24 fps</option>
+      <div id="jpegQualityField" hidden>
+        <label for="jpegQuality">Image quality (JPEG mode)</label>
+        <select id="jpegQuality">
+          <option value="0.7">Fast</option>
+          <option value="0.85" selected>High</option>
+          <option value="0.93">Max</option>
         </select>
       </div>
     </div>
@@ -125,10 +138,15 @@ const serverText = document.getElementById('serverText');
 const tvList = document.getElementById('tvList');
 const hintSelect = document.getElementById('hint');
 const bitrateSelect = document.getElementById('bitrate');
-const jpegWidthSelect = document.getElementById('jpegWidth');
-const jpegFpsSelect = document.getElementById('jpegFps');
+const resolutionSelect = document.getElementById('resolution');
+const fpsSelect = document.getElementById('fps');
+const jpegQualitySelect = document.getElementById('jpegQuality');
 
 const MAX_SOCKET_BUFFER = 2 * 1024 * 1024;
+// Hardware-decoded on nearly every TV and hardware-encoded on Macs.
+const PREFERRED_CODEC = 'video/H264';
+// Lowest bitrate WebRTC may drop to on a congested link, in kbps.
+const MIN_BITRATE_KBPS = 5000;
 
 let ws = null;
 let stream = null;
@@ -163,6 +181,9 @@ function setServerStatus(kind, text) {
 
 function handleMessage(msg) {
   switch (msg.type) {
+    case 'config':
+      document.getElementById('jpegQualityField').hidden = !msg.jpegFallback;
+      break;
     case 'receivers':
       receiverIds = msg.ids;
       for (const id of [...jpegReceivers]) if (!receiverIds.includes(id)) jpegReceivers.delete(id);
@@ -192,10 +213,7 @@ function handleMessage(msg) {
 
 async function startSharing() {
   try {
-    stream = await navigator.mediaDevices.getDisplayMedia({
-      video: { frameRate: { ideal: 30, max: 60 }, width: { ideal: 1920 }, height: { ideal: 1080 } },
-      audio: false,
-    });
+    stream = await navigator.mediaDevices.getDisplayMedia({ video: captureConstraints(), audio: false });
   } catch (err) {
     setServerStatus('warn', 'Screen sharing was cancelled or blocked');
     return;
@@ -211,6 +229,29 @@ async function startSharing() {
   sendMsg({ type: 'sharing', active: true });
 
   for (const id of receiverIds) if (!jpegReceivers.has(id)) startPeer(id);
+  updateJpegLoop();
+}
+
+// Max bounds keep the screen's aspect ratio while capping its size.
+function captureConstraints() {
+  const fps = Number(fpsSelect.value);
+  const constraints = { frameRate: { ideal: fps, max: fps } };
+  if (resolutionSelect.value !== 'native') {
+    const [w, h] = resolutionSelect.value.split('x').map(Number);
+    constraints.width = { max: w };
+    constraints.height = { max: h };
+  }
+  return constraints;
+}
+
+async function applyCapture() {
+  if (!stream) return;
+  try {
+    await stream.getVideoTracks()[0].applyConstraints(captureConstraints());
+  } catch (err) {
+    console.warn('applyConstraints failed', err);
+  }
+  for (const pc of peers.values()) applyEncoding(pc);
   updateJpegLoop();
 }
 
@@ -234,7 +275,10 @@ async function startPeer(id) {
   const pc = new RTCPeerConnection({ iceServers: [] });
   peers.set(id, pc);
 
-  stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+  for (const track of stream.getTracks()) {
+    const transceiver = pc.addTransceiver(track, { direction: 'sendonly', streams: [stream] });
+    preferCodec(transceiver);
+  }
   pc.onicecandidate = (e) => {
     if (e.candidate) sendMsg({ type: 'signal', to: id, data: { candidate: e.candidate } });
   };
@@ -249,12 +293,51 @@ async function startPeer(id) {
   renderTvList();
 }
 
+// Moves H.264 to the front of the offer; TVs without it still negotiate another codec.
+function preferCodec(transceiver) {
+  const caps = RTCRtpSender.getCapabilities && RTCRtpSender.getCapabilities('video');
+  if (!caps || !transceiver.setCodecPreferences) return;
+  const preferred = caps.codecs.filter((c) => c.mimeType === PREFERRED_CODEC);
+  const others = caps.codecs.filter((c) => c.mimeType !== PREFERRED_CODEC);
+  try { transceiver.setCodecPreferences([...preferred, ...others]); } catch (err) { console.warn(err); }
+}
+
+// Chrome starts a new stream at about 300 kbps and ramps up over many seconds,
+// which is the blurry first stretch. Telling it the start and floor bitrate in
+// the TV's answer makes it send at full quality straight away.
+function boostBitrate(sdp) {
+  const startKbps = Math.round(Number(bitrateSelect.value) / 1000 / 2);
+  const params = `x-google-start-bitrate=${startKbps};x-google-min-bitrate=${MIN_BITRATE_KBPS}`;
+  const lines = sdp.split('\r\n');
+  const hasFmtp = new Set(lines.map((l) => (l.match(/^a=fmtp:(\d+) /) || [])[1]));
+  const codecPts = new Set();
+  let inVideo = false;
+  const out = [];
+  for (const line of lines) {
+    if (line.startsWith('m=')) inVideo = line.startsWith('m=video');
+    const rtpmap = inVideo && line.match(/^a=rtpmap:(\d+) ([\w-]+)\//);
+    const fmtp = inVideo && line.match(/^a=fmtp:(\d+) /);
+    if (fmtp && codecPts.has(fmtp[1])) {
+      out.push(`${line};${params}`);
+      continue;
+    }
+    out.push(line);
+    if (!rtpmap || /^(rtx|red|ulpfec|flexfec-03)$/i.test(rtpmap[2])) continue;
+    codecPts.add(rtpmap[1]);
+    if (!hasFmtp.has(rtpmap[1])) out.push(`a=fmtp:${rtpmap[1]} ${params}`);
+  }
+  return out.join('\r\n');
+}
+
 async function applyEncoding(pc) {
   for (const s of pc.getSenders()) {
     if (!s.track || s.track.kind !== 'video') continue;
     const params = s.getParameters();
     if (!params.encodings || !params.encodings.length) params.encodings = [{}];
     params.encodings[0].maxBitrate = Number(bitrateSelect.value);
+    params.encodings[0].maxFramerate = Number(fpsSelect.value);
+    params.encodings[0].priority = 'high';
+    params.encodings[0].networkPriority = 'high';
     params.degradationPreference = hintSelect.value === 'detail' ? 'maintain-resolution' : 'maintain-framerate';
     try { await s.setParameters(params); } catch (err) { console.warn('setParameters failed', err); }
   }
@@ -264,7 +347,7 @@ async function handleSignal(id, data) {
   const pc = peers.get(id);
   if (!pc) return;
   try {
-    if (data.sdp) await pc.setRemoteDescription(data.sdp);
+    if (data.sdp) await pc.setRemoteDescription({ type: data.sdp.type, sdp: boostBitrate(data.sdp.sdp) });
     else if (data.candidate) await pc.addIceCandidate(data.candidate);
   } catch (err) {
     console.warn('Signal error', err);
@@ -297,7 +380,7 @@ function updateJpegLoop() {
   if (active) {
     const track = stream.getVideoTracks()[0];
     imageCapture = 'ImageCapture' in window ? new ImageCapture(track) : null;
-    tickWorker.postMessage(Math.round(1000 / Number(jpegFpsSelect.value)));
+    tickWorker.postMessage(Math.round(1000 / Number(fpsSelect.value)));
   } else {
     imageCapture = null;
     tickWorker.postMessage(0);
@@ -319,17 +402,15 @@ async function sendJpegFrame() {
   try {
     const frame = await grabFrame();
     if (!frame) return;
-    const srcW = frame.width || frame.videoWidth;
-    const srcH = frame.height || frame.videoHeight;
-    const scale = Math.min(1, Number(jpegWidthSelect.value) / srcW);
-    const w = Math.round(srcW * scale);
-    const h = Math.round(srcH * scale);
+    // The capture is already sized by the Resolution setting, so no scaling here.
+    const w = frame.width || frame.videoWidth;
+    const h = frame.height || frame.videoHeight;
     // Assigning a canvas size reallocates and clears it, even to the same value.
     if (canvas.width !== w) canvas.width = w;
     if (canvas.height !== h) canvas.height = h;
     ctx.drawImage(frame, 0, 0, w, h);
     if (frame.close) frame.close();
-    const blob = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', 0.75));
+    const blob = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', Number(jpegQualitySelect.value)));
     if (blob && ws.readyState === WebSocket.OPEN) ws.send(blob);
   } finally {
     frameBusy = false;
@@ -364,7 +445,8 @@ hintSelect.onchange = () => {
   for (const pc of peers.values()) applyEncoding(pc);
 };
 bitrateSelect.onchange = () => { for (const pc of peers.values()) applyEncoding(pc); };
-jpegFpsSelect.onchange = updateJpegLoop;
+resolutionSelect.onchange = applyCapture;
+fpsSelect.onchange = applyCapture;
 
 startBtn.onclick = startSharing;
 stopBtn.onclick = stopSharing;

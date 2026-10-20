@@ -31,7 +31,7 @@ function parseArgs(argv) {
 
 function startServer(port) {
   const child = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
-    env: { ...process.env, PORT: String(port) },
+    env: { ...process.env, PORT: String(port), JPEG_FALLBACK: '1' },
     stdio: ['ignore', 'pipe', 'inherit'],
   });
   return new Promise((resolve, reject) => {

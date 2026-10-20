@@ -11,6 +11,9 @@ const PORT = Number(process.env.PORT) || 8080;
 const PUBLIC_DIR = path.join(__dirname, 'public');
 // Frames above this size are refused; a 4K JPEG is well under it.
 const MAX_FRAME_BYTES = 8 * 1024 * 1024;
+// Compatibility (JPEG) mode is off unless started with JPEG_FALLBACK=1.
+// While off, TVs without working WebRTC show an error instead of falling back.
+const JPEG_FALLBACK = process.env.JPEG_FALLBACK === '1';
 
 const ROUTES = {
   '/': 'receiver.html',
@@ -96,7 +99,7 @@ wss.on('connection', (ws) => {
 
   ws.on('message', (data, isBinary) => {
     if (isBinary) {
-      if (ws === sender) relayFrame(data);
+      if (ws === sender && JPEG_FALLBACK) relayFrame(data);
       return;
     }
 
@@ -114,6 +117,7 @@ wss.on('connection', (ws) => {
           sender = ws;
           role = 'sender';
           console.log('Sender connected');
+          send(ws, { type: 'config', jpegFallback: JPEG_FALLBACK });
           sendStatus();
           broadcastToReceivers({ type: 'sender-online' });
         } else {
@@ -123,7 +127,9 @@ wss.on('connection', (ws) => {
             ws, mode: 'webrtc', acks: msg.acks === true, sending: false, pending: null,
           });
           console.log(`TV connected (id ${receiverId})`);
-          send(ws, { type: 'welcome', id: receiverId, senderOnline: Boolean(sender) });
+          send(ws, {
+            type: 'welcome', id: receiverId, senderOnline: Boolean(sender), jpegFallback: JPEG_FALLBACK,
+          });
           send(sender, { type: 'receiver-joined', id: receiverId });
           sendStatus();
         }
@@ -139,7 +145,7 @@ wss.on('connection', (ws) => {
         break;
 
       case 'want-jpeg':
-        if (role === 'receiver') {
+        if (role === 'receiver' && JPEG_FALLBACK) {
           receivers.get(receiverId).mode = 'jpeg';
           console.log(`TV ${receiverId} switched to JPEG mode`);
           send(sender, { type: 'want-jpeg', from: receiverId });
